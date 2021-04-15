@@ -121,16 +121,6 @@ func (s *scheduler) executeJob(job db.JobModel) error {
 	return nil
 }
 
-func (s *scheduler) deleteJob(ctx context.Context, id string) error {
-	if _, err := s.client.Job.FindUnique(
-		db.Job.ID.Equals(id),
-	).Delete().Exec(ctx); err != nil {
-		return err
-	}
-	log.Printf("Deleted job %s.", id)
-	return nil
-}
-
 func (s *scheduler) executePendingJobs() error {
 	ctx := context.TODO()
 	jobs, err := s.client.Job.FindMany(
@@ -143,7 +133,9 @@ func (s *scheduler) executePendingJobs() error {
 		if err := s.executeJob(job); err != nil {
 			log.Printf("Failed to execute job %s: %v", job.ID, err)
 		}
-		if err := s.deleteJob(ctx, job.ID); err != nil {
+		if _, err := s.client.Job.FindUnique(
+			db.Job.ID.Equals(job.ID),
+		).Delete().Exec(ctx); err != nil {
 			return err
 		}
 	}
@@ -202,7 +194,19 @@ func (s *scheduler) createNewJob(ctx context.Context, on time.Time, body []byte)
 		return "", err
 	}
 	log.Printf("New job with id %s.", created.ID)
+	s.recomp <- struct{}{}
 	return created.ID, nil
+}
+
+func (s *scheduler) deleteFutureJob(ctx context.Context, id string) error {
+	if _, err := s.client.Job.FindUnique(
+		db.Job.ID.Equals(id),
+	).Delete().Exec(ctx); err != nil {
+		return err
+	}
+	s.recomp <- struct{}{}
+	log.Printf("Deleted job %s.", id)
+	return nil
 }
 
 type webs struct {
@@ -292,7 +296,7 @@ func (ws *webs) deleteHandler() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := ws.sched.deleteJob(r.Context(), req.JobID); err != nil {
+		if err := ws.sched.deleteFutureJob(r.Context(), req.JobID); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
