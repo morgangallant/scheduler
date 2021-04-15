@@ -5,7 +5,7 @@ WORKDIR /scheduler
 
 ARG DATABASE_URL
 
-RUN go get .
+RUN go get github.com/prisma/prisma-client-go
 RUN go run github.com/prisma/prisma-client-go generate
 RUN go run github.com/prisma/prisma-client-go db push --preview-feature
 RUN go build -o scheduler .
