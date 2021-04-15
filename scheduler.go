@@ -96,6 +96,8 @@ func newScheduler(client *db.PrismaClient, secret, endpoint string) *scheduler {
 	}
 }
 
+const headerSecretKey = "Scheduler-Secret"
+
 func (s *scheduler) executeJob(job db.JobModel) error {
 	var rdr io.Reader
 	body, ok := job.Body()
@@ -106,6 +108,7 @@ func (s *scheduler) executeJob(job db.JobModel) error {
 	if err != nil {
 		return err
 	}
+	req.Header.Set(headerSecretKey, s.secret)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -245,8 +248,6 @@ func (ws *webs) rootHandler() http.HandlerFunc {
 		fmt.Fprint(w, "Scheduler (github.com/morgangallant/scheduler) written by Morgan Gallant.")
 	}
 }
-
-const headerSecretKey = "Scheduler-Secret"
 
 func (ws *webs) insertHandler() http.HandlerFunc {
 	type request struct {
