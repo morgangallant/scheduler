@@ -25,8 +25,8 @@ Response:
 {"id":"cknjdu2k300153zugmucamxxo"}
 ```
 
-Cancelling a Scheduled job
-Note: If the job doesn't exist, this will fail silently.
+Cancelling a Scheduled Job
+(note: if the job doesn't exist, this will fail silently.)
 
 ```
 POST https://scheduler.yourcompany.com/delete
