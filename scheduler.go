@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -199,9 +200,12 @@ func (s *scheduler) createNewJob(ctx context.Context, on time.Time, body []byte)
 }
 
 func (s *scheduler) deleteFutureJob(ctx context.Context, id string) error {
-	if _, err := s.client.Job.FindUnique(
+	_, err := s.client.Job.FindUnique(
 		db.Job.ID.Equals(id),
-	).Delete().Exec(ctx); err != nil {
+	).Delete().Exec(ctx)
+	if errors.Is(err, db.ErrNotFound) {
+		return nil
+	} else if err != nil {
 		return err
 	}
 	s.recomp <- struct{}{}
