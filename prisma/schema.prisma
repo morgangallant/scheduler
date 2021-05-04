@@ -15,3 +15,9 @@ model Job {
 
     @@index([scheduledFor])
 }
+
+model Cron {
+  id String @id @default(cuid())
+  createdAt DateTime @default(now())
+  specification String
+}

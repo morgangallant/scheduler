@@ -14,6 +14,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/morgangallant/scheduler/prisma/db"
+	"github.com/robfig/cron/v3"
 )
 
 func init() {
@@ -54,9 +55,11 @@ func run() error {
 		return err
 	}
 	defer client.Disconnect()
-	scheduler := newScheduler(client, secret(), endpoint())
-	webServer := newWebServer(":"+port(), scheduler)
-	return runServers(scheduler, webServer)
+	secret, endpoint := secret(), endpoint()
+	scheduler := newScheduler(client, secret, endpoint)
+	cs := newCrons(client, secret, endpoint)
+	webServer := newWebServer(":"+port(), scheduler, cs)
+	return runServers(scheduler, cs, webServer)
 }
 
 type server interface {
@@ -82,7 +85,6 @@ func runServers(servers ...server) error {
 type scheduler struct {
 	client   *db.PrismaClient
 	recomp   chan struct{}
-	close    chan struct{}
 	secret   string
 	endpoint string
 }
@@ -91,7 +93,6 @@ func newScheduler(client *db.PrismaClient, secret, endpoint string) *scheduler {
 	return &scheduler{
 		client:   client,
 		recomp:   make(chan struct{}),
-		close:    make(chan struct{}),
 		secret:   secret,
 		endpoint: endpoint,
 	}
@@ -182,7 +183,6 @@ func (s *scheduler) start() error {
 }
 
 func (s *scheduler) stop() {
-	s.close <- struct{}{}
 	log.Println("Closed scheduler.")
 }
 
@@ -213,16 +213,130 @@ func (s *scheduler) deleteFutureJob(ctx context.Context, id string) error {
 	return nil
 }
 
+type crons struct {
+	client   *db.PrismaClient
+	recomp   chan struct{}
+	endpoint string
+	secret   string
+}
+
+func newCrons(client *db.PrismaClient, secret, endpoint string) *crons {
+	return &crons{
+		client:   client,
+		recomp:   make(chan struct{}),
+		endpoint: endpoint,
+		secret:   secret,
+	}
+}
+
+type cronJob struct {
+	JobID string `json:"id"`
+	Spec  string `json:"spec"`
+}
+
+func (cs *crons) getCronJobs() ([]cronJob, error) {
+	jobs, err := cs.client.Cron.FindMany().Exec(context.TODO())
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]cronJob, 0, len(jobs))
+	for _, job := range jobs {
+		ret = append(ret, cronJob{
+			JobID: job.ID,
+			Spec:  job.Specification,
+		})
+	}
+	return ret, nil
+}
+
+type cronJobRequest struct {
+	JobID string `json:"cron_id"`
+}
+
+func (cs *crons) executeCronJob(id string) error {
+	buf, err := json.Marshal(cronJobRequest{
+		JobID: id,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", cs.endpoint, bytes.NewBuffer(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set(headerSecretKey, cs.secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("invalid status code %d returned: %s", resp.StatusCode, resp.Status)
+	}
+	return nil
+}
+
+func (cs *crons) clearCronJobs() error {
+	if _, err := cs.client.Cron.FindMany().Delete().Exec(context.TODO()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (cs *crons) insertCronJob(cj cronJob) error {
+	if _, err := cs.client.Cron.CreateOne(
+		db.Cron.Specification.Set(cj.Spec),
+		db.Cron.ID.Set(cj.JobID),
+	).Exec(context.TODO()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (cs *crons) start() error {
+	log.Println("Started crons.")
+	for {
+		client := cron.New(cron.WithSeconds())
+		jobs, err := cs.getCronJobs()
+		if err != nil {
+			return err
+		}
+		for _, job := range jobs {
+			j := job
+			if _, err := client.AddFunc(j.Spec, func() {
+				if err := cs.executeCronJob(j.JobID); err != nil {
+					log.Printf("Failed to execute cron job %s (%s): %v", j.JobID, j.Spec, err)
+					return
+				}
+				log.Printf("Executed cron job %s (%s).", j.JobID, j.Spec)
+			}); err != nil {
+				return err
+			}
+		}
+		client.Start()
+		log.Printf("Started crons w/ %d jobs.", len(jobs))
+		<-cs.recomp
+		log.Println("Got crons recompute request, tearing down.")
+		client.Stop()
+	}
+}
+
+func (cs *crons) stop() {
+	log.Println("Closed crons.")
+}
+
 type webs struct {
 	addr       string
 	mux        *http.ServeMux
 	sched      *scheduler
+	cs         *crons
 	underlying *http.Server
 }
 
-func newWebServer(addr string, s *scheduler) *webs {
-	ws := &webs{addr: addr, mux: http.NewServeMux(), sched: s}
+func newWebServer(addr string, s *scheduler, cs *crons) *webs {
+	ws := &webs{addr: addr, mux: http.NewServeMux(), sched: s, cs: cs}
 	ws.mux.HandleFunc("/", ws.rootHandler())
+	ws.mux.HandleFunc("/cron", ws.cronHandler())
 	ws.mux.HandleFunc("/insert", ws.insertHandler())
 	ws.mux.HandleFunc("/delete", ws.deleteHandler())
 	return ws
@@ -304,5 +418,33 @@ func (ws *webs) deleteHandler() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+}
+
+func (ws *webs) cronHandler() http.HandlerFunc {
+	type request struct {
+		Jobs []cronJob `json:"jobs"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if secret := r.Header.Get(headerSecretKey); secret != ws.sched.secret {
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			return
+		}
+		var req request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := ws.cs.clearCronJobs(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, job := range req.Jobs {
+			if err := ws.cs.insertCronJob(job); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		ws.cs.recomp <- struct{}{} // Signal to the crons that it needs to recompute.
 	}
 }
