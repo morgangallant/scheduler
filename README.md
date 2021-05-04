@@ -13,6 +13,7 @@ CRON server with the new values. This is how you should do it, especially in aut
 When a cron job fires, the application will get a POST with the "cron\_id" set. You should check for this
 in the message and respond appropriately.
 
+This is used in production at [Operand](https://operand.ai).
 
 Example Usage:
 
