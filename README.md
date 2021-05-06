@@ -70,4 +70,16 @@ Headers: Scheduler-Secret=XXXXXX
 Response: None
 ```
 
+When a scheduled job, or a CRON job fires, your application (located at `endpoint`)
+will get the following message in a POST:
+```
+{
+  "id": "<job id>", // will be empty if cron_id non-empty
+  "cron_id": "<cron id>", // will be empty if id non-empty
+  "body": { // Omitted for CRON jobs.
+    ... // Your stuff here
+  }
+}
+```
+
 And that's it! Feel free to file issues or do pull requests.

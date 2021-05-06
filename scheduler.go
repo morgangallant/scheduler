@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -100,24 +99,41 @@ func newScheduler(client *db.PrismaClient, secret, endpoint string) *scheduler {
 
 const headerSecretKey = "Scheduler-Secret"
 
-func (s *scheduler) executeJob(job db.JobModel) error {
-	var rdr io.Reader
-	body, ok := job.Body()
-	if ok {
-		rdr = bytes.NewBuffer(body)
-	}
-	req, err := http.NewRequest("POST", s.endpoint, rdr)
+type jobRequest struct {
+	JobID  string          `json:"id"`
+	CronID string          `json:"cron_id"`
+	Body   json.RawMessage `json:"body"`
+}
+
+func sendRequest(secret, endpoint string, jr jobRequest) error {
+	buf, err := json.Marshal(jr)
 	if err != nil {
 		return err
 	}
-	req.Header.Set(headerSecretKey, s.secret)
+	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set(headerSecretKey, secret)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("job failed with non-ok status code %d: %s", resp.StatusCode, resp.Status)
+		return fmt.Errorf("got non-ok status code %d: %s", resp.StatusCode, resp.Status)
+	}
+	return nil
+}
+
+func (s *scheduler) executeJob(job db.JobModel) error {
+	req := jobRequest{JobID: job.ID}
+	buf, ok := job.Body()
+	if ok {
+		req.Body = json.RawMessage(buf)
+	}
+	if err := sendRequest(s.secret, s.endpoint, req); err != nil {
+		return err
 	}
 	log.Printf("Executed job %s.", job.ID)
 	return nil
@@ -253,29 +269,6 @@ type cronJobRequest struct {
 	JobID string `json:"cron_id"`
 }
 
-func (cs *crons) executeCronJob(id string) error {
-	buf, err := json.Marshal(cronJobRequest{
-		JobID: id,
-	})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest("POST", cs.endpoint, bytes.NewBuffer(buf))
-	if err != nil {
-		return err
-	}
-	req.Header.Set(headerSecretKey, cs.secret)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("invalid status code %d returned: %s", resp.StatusCode, resp.Status)
-	}
-	return nil
-}
-
 func (cs *crons) clearCronJobs() error {
 	if _, err := cs.client.Cron.FindMany().Delete().Exec(context.TODO()); err != nil {
 		return err
@@ -304,7 +297,9 @@ func (cs *crons) start() error {
 		for _, job := range jobs {
 			j := job
 			if _, err := client.AddFunc(j.Spec, func() {
-				if err := cs.executeCronJob(j.JobID); err != nil {
+				if err := sendRequest(cs.secret, cs.endpoint, jobRequest{
+					CronID: j.JobID,
+				}); err != nil {
 					log.Printf("Failed to execute cron job %s (%s): %v", j.JobID, j.Spec, err)
 					return
 				}
