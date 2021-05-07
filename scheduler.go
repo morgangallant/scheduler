@@ -289,7 +289,7 @@ func (cs *crons) insertCronJob(cj cronJob) error {
 func (cs *crons) start() error {
 	log.Println("Started crons.")
 	for {
-		client := cron.New(cron.WithSeconds())
+		client := cron.New(cron.WithLocation(time.UTC))
 		jobs, err := cs.getCronJobs()
 		if err != nil {
 			return err
