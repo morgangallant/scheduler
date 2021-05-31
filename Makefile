@@ -17,3 +17,12 @@ reset:
 run:
 	go run .
 
+# Docker commands - same as above, but running inside a docker container.
+docker-run:
+	docker run -it --network="host" -v ${PWD}:/scheduler -w /scheduler golang:1.16.3 make run
+docker-reset:
+	docker run -it --network="host" -v ${PWD}:/scheduler -w /scheduler golang:1.16.3 make reset
+docker-generate:
+	docker run -it --network="host" -v ${PWD}:/scheduler -w /scheduler golang:1.16.3 make generate
+docker-migrate:
+	docker run -it --network="host" -v ${PWD}:/scheduler -w /scheduler golang:1.16.3 make migrate
